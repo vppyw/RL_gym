@@ -61,11 +61,10 @@ class Agent():
         self.act_size = act_size
 
         self.qnet = QNet(state_size,
-                            act_size,
-                            config['seed']).to(config['device'])
+                            act_size).to(config['device'])
         self.qnet_target = QNet(state_size,
-                                    act_size,
-                                    config['seed']).to(config['device'])
+                                    act_size).to(config['device'])
+
         self.opt = torch.optim.AdamW(self.qnet.parameters(),
                                         lr=config['lr'])
 
@@ -106,14 +105,14 @@ class Agent():
                                         self.buff.sample(self.batch_size,
                                                          self.device)
         self.qnet_target.eval()
-        # TODO: fix shape bug
         q_nxt_states = self.qnet_target(nxt_states)\
                                     .detach()\
                                     .max(1)[0].unsqueeze(1)
         q_targets = rewards + self.gamma * q_nxt_states * (1 - dones)
         self.qnet.train()
+        acts = acts.long()
         q_exps = self.qnet(states).gather(1, acts)
-        loss = F.mse(q_exps, q_targets)
+        loss = F.mse_loss(q_exps, q_targets)
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
@@ -138,7 +137,7 @@ def same_seed(seed, env):
         torch.cuda.manual_seed_all(seed)
     torch.backends.cudnn.benchmark = False
     torch.backends.cudnn.deterministic = True
-    env.seed(seed)
+    env.reset(seed=seed)
 
 def main():
     config = {
@@ -155,9 +154,9 @@ def main():
         'eps_max': 1.0,
         'eps_min': 0.005,
         'eps_decay': 0.999,
-        'device': 'cuda' if torch.cuda.is_available() else 'cpu',
+        'device': 'cuda:1' if torch.cuda.is_available() else 'cpu',
     }
-    env = gym.make("LunarLander-v2")
+    env = gym.make("LunarLander-v2", new_step_api=True)
     same_seed(config['seed'], env)
     
     agent = Agent(env.observation_space.shape[0],
@@ -171,14 +170,12 @@ def main():
         score = 0
         for step in range(config['max_step']):
             act = agent.act(state, eps)
-            nxt_state, reward, done, _ = env.step(act)
+            nxt_state, reward, done, _, _ = env.step(act)
             agent.step(state, nxt_state, reward, done, act)
-            break
             state = nxt_state
             score += reward
             if done:
                 break
-
         scores.append(score)
         eps = max(config['eps_min'], eps * config['eps_decay'])
 
