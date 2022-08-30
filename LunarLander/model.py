@@ -1,19 +1,21 @@
-import gym
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import random
 
-from PIL import Image
-from tqdm import tqdm
-
 class Buffer():
+    """
+    Buffer with random smaple
+    """
     def __init__(self, max_len):
         self.arr = []
         self.max_len = max_len
 
     def store(self, state, nxt_state, reward, done, act):
+        """
+        Add new experience to buffer
+        """
         if len(self.arr) > self.max_len:
             self.arr = self.arr[1:]
         self.arr.append((state,
@@ -23,6 +25,10 @@ class Buffer():
                          act))
 
     def sample(self, batch_size, device):
+        """
+        Random sample batch size of experiences
+        output: states, nxt_states, rewards, dones, acts
+        """
         idx = random.choices(range(len(self.arr)), k=batch_size)
         states = torch.from_numpy(np.vstack([
                                     self.arr[i][0] for i in idx
@@ -42,9 +48,17 @@ class Buffer():
         return states, nxt_states, rewards, dones, acts
         
     def __len__(self):
+        """
+        Return size of buffer
+        """
         return len(self.arr)
 
 class QNet(nn.Module):
+    """
+    Basic network for Q-learning
+    intput: (batch size, in_size)
+    output: (batch size, out_size)
+    """
     def __init__(self, in_size, out_size, emb_size=64):
         super().__init__()
         self.fc = nn.Sequential(
@@ -58,7 +72,27 @@ class QNet(nn.Module):
     def forward(self, state):
         return self.fc(state)
 
-class Agent():
+class DuelingQNet(nn.Module):
+    """
+    Network for Dueling DQN
+    """
+    def __init__(self, in_size, out_size, emb_size=64):
+        super().__init__()
+        self.fc = nn.Sequential(
+            nn.Linear(in_size, emb_size),
+            nn.ReLU(),
+            nn.Linear(emb_size, emb_size),
+            nn.ReLU(),
+            nn.Linear(emb_size, out_size),
+        )
+
+    def forward(self, state):
+        pass
+
+class DQN_Agent():
+    """
+    Agent for DQN
+    """
     def __init__(self, state_size, act_size, config):
         self.state_size = state_size
         self.act_size = act_size
@@ -82,6 +116,9 @@ class Agent():
         self.device = config['device']
 
     def act(self, state, eps=0.):
+        """
+        Actor with Epsilon Greedy
+        """
         if random.random() > eps:
             state = torch.from_numpy(state)\
                         .float()\
@@ -95,6 +132,9 @@ class Agent():
             return random.choice(np.arange(self.act_size))
 
     def step(self, state, nxt_state, reward, done, act):
+        """
+        Update for each step
+        """
         self.buff.store(state, nxt_state, reward, done, act)
         self.t_step += 1
         self.t_step %= self.learn_step * self.update_step
@@ -104,6 +144,9 @@ class Agent():
             self.soft_update()
 
     def learn(self):
+        """
+        Update target Q
+        """
         states, nxt_states, rewards, dones, acts = \
                                         self.buff.sample(self.batch_size,
                                                          self.device)
@@ -121,76 +164,57 @@ class Agent():
         self.opt.step()
 
     def soft_update(self, t=1.):
+        """
+        Soft update target Q to Q
+        """
         for param, param_target in zip(self.qnet.parameters(),
                                         self.qnet_target.parameters()):
             param_target.data.copy_(self.t * param.data\
                                     + (1 - self.t) * param_target.data)
 
     def to(self, device):
+        """
+        Change device
+        """
         self.device = device
         self.q_net = self.q_net.to(device)
         self.q_net_target = self.q_net_target.to(device)
 
-def same_seed(seed, env):
-    random.seed(seed)
-    np.random.seed(seed)
-    torch.manual_seed(seed)
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(seed)
-        torch.cuda.manual_seed_all(seed)
-    torch.backends.cudnn.benchmark = False
-    torch.backends.cudnn.deterministic = True
-    env.reset(seed=seed)
+class DoubleDQN_Agent(DQN_Agent):
+    def __init__(self, state_size, act_size, config):
+        """
+        Inherit __init__ from DQN_Agent
+        """
+        super().__init__(state_size, act_size, config)
 
-def main():
-    config = {
-        'seed': 0,
-        'num_episode': 3000,
-        'max_step': 1000,
-        'batch_size': 64,
-        'buffer_size': 1e5,
-        'lr': 1e-4,
-        'learn_step': 1,
-        'update_step': 4,
-        'gamma': 0.99,
-        't': 1e-3,
-        'eps_max': 1.0,
-        'eps_min': 0.005,
-        'eps_decay': 0.999,
-        'device': 'cuda:1' if torch.cuda.is_available() else 'cpu',
-        'log': 'scores.csv',
-        'model': 'DQN_QNet.pt',
-    }
-    env = gym.make("LunarLander-v2", new_step_api=True)
-    same_seed(config['seed'], env)
+    def learn(self):
+        """
+        Update target Q with Double DQN algo
+        """
+        states, nxt_states, rewards, dones, acts = \
+                                        self.buff.sample(self.batch_size,
+                                                         self.device)
+        self.qnet.eval()
+        est_act = self.qnet(nxt_states).argmax(dim=1)
+        self.qnet_target.eval()
+        q_nxt_states = self.qnet_target(nxt_states)\
+                                    .gather(dim=1, index=est_act.unsqueeze(1))\
+                                    .detach()
+        q_targets = rewards + self.gamma * q_nxt_states * (1 - dones)
+        self.qnet.train()
+        acts = acts.long()
+        q_exps = self.qnet(states).gather(1, acts)
+        loss = F.mse_loss(q_exps, q_targets)
+        self.opt.zero_grad()
+        loss.backward()
+        self.opt.step()
 
-    agent = Agent(env.observation_space.shape[0],
-                    env.action_space.n,
-                    config)
-    
-    eps = config['eps_max']
-    scores = []
-    for episode in tqdm(range(config['num_episode']), ncols=50):
-        state = env.reset()
-        score = 0
-        for step in range(config['max_step']):
-            act = agent.act(state, eps)
-            nxt_state, reward, done, _, _ = env.step(act)
-            agent.step(state, nxt_state, reward, done, act)
-            state = nxt_state
-            score += reward
-            if done:
-                break
-        scores.append(score)
-        eps = max(config['eps_min'], eps * config['eps_decay'])
-
-    aganet.qnet.eval()
-    agent.qnet.to('cpu')
-    torch.save(agent.qnet.state_dict(), config['model'])
-    with open(config['log'], 'w') as f:
-        f.write('episodes,score')
-        for idx, val in enumerate(scores):
-            f.write(f'{idx},{val}\n')
-
-if __name__ == '__main__':
-    main()
+class DuelingDQN_Agent(DQN_Agent):
+    def __init__(self, state_size, act_size, config):
+        super().__init__(state_size, act_size, config)
+        self.qnet = DuelingQNet(state_size,
+                                act_size).to(config['device'])
+        self.qnet_target = DuelingQNet(state_size,
+                                        act_size).to(config['device'])
+        self.opt = torch.optim.AdamW(self.qnet.parameters(),
+                                        lr=config['lr'])
