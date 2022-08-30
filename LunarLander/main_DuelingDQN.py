@@ -37,8 +37,8 @@ def main():
         'eps_min': 0.005,
         'eps_decay': 0.999,
         'device': 'cuda:1' if torch.cuda.is_available() else 'cpu',
-        'log': 'double_dqn_scores.csv',
-        'model': 'DoubleDQN_QNet.pt',
+        'log': 'dueling_dqn_scores.csv',
+        'model': 'DuelingDQN_QNet.pt',
     }
     env = gym.make("LunarLander-v2", new_step_api=True)
     same_seed(config['seed'], env)
