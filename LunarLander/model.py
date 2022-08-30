@@ -83,11 +83,21 @@ class DuelingQNet(nn.Module):
             nn.ReLU(),
             nn.Linear(emb_size, emb_size),
             nn.ReLU(),
-            nn.Linear(emb_size, out_size),
+        )
+        self.v_fc = nn.Sequential(
+            nn.Linear(emb_size, 1),
+        )
+        self.a_fc = nn.Sequential(
+            nn.Linear(emb_size, out_size)
         )
 
     def forward(self, state):
-        pass
+        comm = self.fc(state)
+        v = self.v_fc(comm)
+        a = self.a_fc(comm)
+        # contraints
+        a_norm = a - a.mean(dim=1, keepdim=True)
+        return v + a_norm
 
 class DQN_Agent():
     """
