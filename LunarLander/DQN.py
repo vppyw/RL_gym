@@ -5,6 +5,9 @@ import torch.nn.functional as F
 import numpy as np
 import random
 
+from PIL import Image
+from tqdm import tqdm
+
 class Buffer():
     def __init__(self, max_len):
         self.arr = []
@@ -142,7 +145,7 @@ def same_seed(seed, env):
 def main():
     config = {
         'seed': 0,
-        'num_episode': 1000,
+        'num_episode': 3000,
         'max_step': 1000,
         'batch_size': 64,
         'buffer_size': 1e5,
@@ -155,17 +158,19 @@ def main():
         'eps_min': 0.005,
         'eps_decay': 0.999,
         'device': 'cuda:1' if torch.cuda.is_available() else 'cpu',
+        'log': 'scores.csv',
+        'model': 'DQN_QNet.pt',
     }
     env = gym.make("LunarLander-v2", new_step_api=True)
     same_seed(config['seed'], env)
-    
+
     agent = Agent(env.observation_space.shape[0],
                     env.action_space.n,
                     config)
     
     eps = config['eps_max']
     scores = []
-    for episode in range(config['num_episode']):
+    for episode in tqdm(range(config['num_episode']), ncols=50):
         state = env.reset()
         score = 0
         for step in range(config['max_step']):
@@ -178,6 +183,14 @@ def main():
                 break
         scores.append(score)
         eps = max(config['eps_min'], eps * config['eps_decay'])
+
+    aganet.qnet.eval()
+    agent.qnet.to('cpu')
+    torch.save(agent.qnet.state_dict(), config['model'])
+    with open(config['log'], 'w') as f:
+        f.write('episodes,score')
+        for idx, val in enumerate(scores):
+            f.write(f'{idx},{val}\n')
 
 if __name__ == '__main__':
     main()
