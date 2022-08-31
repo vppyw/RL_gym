@@ -3,6 +3,8 @@ import torch.nn as nn
 import torch.nn.functional as F
 import numpy as np
 import random
+import math
+from multiprocessing import Pool
 
 class Buffer():
     """
@@ -27,7 +29,7 @@ class Buffer():
     def sample(self, batch_size, device):
         """
         Random sample batch size of experiences
-        output: states, nxt_states, rewards, dones, acts
+        output: states, nxt_states, rewards, dones, acts, idx
         """
         idx = random.choices(range(len(self.arr)), k=batch_size)
         states = torch.from_numpy(np.vstack([
@@ -45,14 +47,72 @@ class Buffer():
         acts = torch.from_numpy(np.vstack([
                                     self.arr[i][4] for i in idx
                                     ])).float().to(device)
-        return states, nxt_states, rewards, dones, acts
+        return states, nxt_states, rewards, dones, acts, idx
         
     def __len__(self):
         """
-        Return size of buffer
+        Return the size of buffer
         """
         return len(self.arr)
 
+class PrioritizedBuffer():
+    def __init__(self, max_len):
+        """
+        Prioritized Replay implemented by sum-tree
+        """
+        self.max_len = max_len
+        self.arr = []
+        self.losses = []
+        self.weights = []
+
+    def store(self, state, nxt_state, reward, done, act, loss=1e-12):
+        """
+        Add new experience to buffer with given weight
+        """
+        if len(self.arr) > self.max_len:
+            self.arr = self.arr[1:]
+        self.arr.append((state,
+                         nxt_state,
+                         reward,
+                         done,
+                         act))
+        self.losses.append(loss)
+        self.weights.append(loss) # Set weight same as loss
+        
+    def update_loss(self, idxes, losses):
+        if len(idxes) != len(losses):
+            raise ValueError
+
+        for idx, loss in zip(idxes, losses):
+            self.losses[idx] = loss.item()
+            self.weights[idx] = loss.item() # Set weight same as loss
+
+    def sample(self, batch_size, device):
+        """
+        Random sample batch size of experiences
+        output: states, nxt_states, rewards, dones, acts, idx
+        """
+        idx = random.choices(range(len(self.weights)), weights=self.weights, k=batch_size)
+        states = torch.from_numpy(np.vstack([
+                                    self.arr[i][0] for i in idx
+                                    ])).float().to(device)
+        nxt_states = torch.from_numpy(np.vstack([
+                                    self.arr[i][1] for i in idx
+                                    ])).float().to(device)
+        rewards = torch.from_numpy(np.vstack([
+                                    self.arr[i][2] for i in idx
+                                    ])).float().to(device)
+        dones = torch.from_numpy(np.vstack([
+                                    self.arr[i][3] for i in idx
+                                    ])).float().to(device)
+        acts = torch.from_numpy(np.vstack([
+                                    self.arr[i][4] for i in idx
+                                    ])).float().to(device)
+        return states, nxt_states, rewards, dones, acts, idx
+        
+    def __len__(self):
+        return len(self.arr)
+    
 class QNet(nn.Module):
     """
     Basic network for Q-learning
@@ -157,7 +217,7 @@ class DQN_Agent():
         """
         Update target Q
         """
-        states, nxt_states, rewards, dones, acts = \
+        states, nxt_states, rewards, dones, acts, idx = \
                                         self.buff.sample(self.batch_size,
                                                          self.device)
         self.qnet_target.eval()
@@ -201,7 +261,7 @@ class DoubleDQN_Agent(DQN_Agent):
         """
         Update target Q with Double DQN algo
         """
-        states, nxt_states, rewards, dones, acts = \
+        states, nxt_states, rewards, dones, acts, idx = \
                                         self.buff.sample(self.batch_size,
                                                          self.device)
         self.qnet.eval()
@@ -222,9 +282,71 @@ class DoubleDQN_Agent(DQN_Agent):
 class DuelingDQN_Agent(DQN_Agent):
     def __init__(self, state_size, act_size, config):
         super().__init__(state_size, act_size, config)
+        """
+        Change network for Dueling DQN
+        """
         self.qnet = DuelingQNet(state_size,
                                 act_size).to(config['device'])
         self.qnet_target = DuelingQNet(state_size,
                                         act_size).to(config['device'])
         self.opt = torch.optim.AdamW(self.qnet.parameters(),
                                         lr=config['lr'])
+
+class PrioritizeDQN_Agent(DQN_Agent):
+    def __init__(self, state_size, act_size, config):
+        """
+        Change basic random buffer to prioritize replay buffer
+        """
+        super().__init__(state_size, act_size, config)
+        self.buff = PrioritizedBuffer(config['buffer_size'])
+
+    def step(self, state, nxt_state, reward, done, act):
+        """
+        Update for each step with loss
+        """
+        # Calculate loss same as Double DQN
+        t_state = torch.from_numpy(state).to(self.device)
+        t_nxt_state = torch.from_numpy(nxt_state).to(self.device)
+        t_reward = torch.Tensor([reward]).to(self.device)
+        t_act = torch.Tensor([act]).to(self.device)
+        self.qnet.eval()
+        est_act = self.qnet(t_nxt_state).argmax()
+        self.qnet_target.eval()
+        q_nxt_state = self.qnet_target(t_nxt_state)\
+                                  .gather(dim=0, index=est_act)
+        q_target = t_reward + self.gamma * q_nxt_state * (1 - done)
+        self.qnet.train()
+        t_act = t_act.long()
+        q_exp = self.qnet(t_state).gather(dim=0, index=t_act)
+        loss = F.mse_loss(q_exp, q_target).item()
+
+        self.buff.store(state, nxt_state, reward, done, act, loss)
+        self.t_step += 1
+        self.t_step %= self.learn_step * self.update_step
+        if self.t_step % self.learn_step == 0:
+            self.learn()
+        if self.t_step % self.update_step == 0:
+            self.soft_update()
+
+    def learn(self):
+        """
+        Update target Q with Double DQN algo
+        """
+        states, nxt_states, rewards, dones, acts, idx = \
+                                        self.buff.sample(self.batch_size,
+                                                         self.device)
+        self.qnet.eval()
+        est_act = self.qnet(nxt_states).argmax(dim=1)
+        self.qnet_target.eval()
+        q_nxt_states = self.qnet_target(nxt_states)\
+                                    .gather(dim=1, index=est_act.unsqueeze(1))\
+                                    .detach()
+        q_targets = rewards + self.gamma * q_nxt_states * (1 - dones)
+        self.qnet.train()
+        acts = acts.long()
+        q_exps = self.qnet(states).gather(1, acts)
+        loss = F.mse_loss(q_exps, q_targets)
+        self.opt.zero_grad()
+        loss.backward()
+        self.opt.step()
+        self.buff.update_loss(idx, (q_exps - q_targets).pow(2).sum(dim=1) / q_exps.size(1))
