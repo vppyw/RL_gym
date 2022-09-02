@@ -159,6 +159,117 @@ class DuelingQNet(nn.Module):
         a_norm = a - a.mean(dim=1, keepdim=True)
         return v + a_norm
 
+class NoisyLayer(nn.Module):
+    """
+    Noisy Linear Layer
+    """
+    def __init__(self, in_features, out_features, var_init):
+        super().__init__()
+        self.in_features = in_features
+        self.out_features = out_features
+        self.var_init = var_init
+        self.weights_mu = nn.Parameter(
+                            torch.FloatTensor(out_features, in_features)
+                          )
+        self.weights_sig = nn.Parameter(
+                            torch.FloatTensor(out_features, in_features)
+                           )
+        self.register_buffer('weights_eps',
+                             torch.FloatTensor(out_features, in_features))
+
+        self.bias_mu = nn.Parameter(torch.FloatTensor(out_features))
+        self.bias_sig = nn.Parameter(torch.FloatTensor(out_features))
+        self.register_buffer('bias_eps', torch.FloatTensor(out_features))
+
+        self.reset_parameters()
+        self.set_noise()
+
+    def forward(self, x):
+        if self.training:
+            weights = self.weights_mu + self.weights_sig * self.weights_eps
+            bias = self.bias_mu + self.bias_sig * self.bias_eps
+        else:
+            weights = self.weights_mu
+            bias = self.bias_mu
+        return F.linear(x, weights, bias)
+    
+    def reset_parameters(self):
+        """
+        Initialisation parameters for factorised noisy network
+        """
+        self.set_mu(self.weights_mu)
+        self.set_sig(self.weights_sig)
+        self.set_mu(self.bias_mu)
+        self.set_sig(self.bias_sig)
+
+    def set_mu(self, mu):
+        bound = 1 / math.sqrt(self.in_features)
+        mu.data.uniform_(-bound, bound)
+
+    def set_sig(self, sig):
+        sig.data.fill_(self.var_init / math.sqrt(self.in_features))
+    def set_noise(self):
+        """
+        Setting new noise using factorised Gaussian noise
+        """
+        # Factorised Gaussian noise
+        eps_i = self.f(self.in_features)
+        eps_j = self.f(self.out_features)
+        self.weights_eps.data.copy_(esp_j.outer(esp_i))
+
+        # Problem: should the noise be the same as esp_j?
+        esp_j = self.f(self.out_features)
+        self.bias_eps.data.copy_(esp_j)
+
+    def f(self, size):
+        """
+        for Factorised Gaussian noise
+        """
+        x = torch.randn(size)
+        x = x.sign().mul(x.abs().sqrt())
+        return x
+
+class NoisyNet(nn.Module):
+    def __init__(self, in_size, out_size, emb_size=64):
+        super().__init__()
+        self.linear = nn.Linear(in_size, emb_size)
+        self.noisy0 = NoisyLayer(emb_size, emb_size)
+        self.noisy1 = NoisyLayer(emb_size, emb_size)
+        
+    def forward(self, state):
+        x = F.relu(self.linear(state))
+        x = F.relu(self.noisy0(x))
+        x = self.noisy1(x)
+        return x
+
+    def set_noise(self):
+        self.noisy0.set_noise()
+        self.noisy1.set_noise()
+
+class DuelingNoisyNet(nn.Module):
+    def __init__(self, in_size, out_size, emb_size=64):
+        super().__init__()
+        self.linear = nn.Sequential(
+            nn.Linear(in_size, emb_size)
+            nn.ReLU(),
+        )
+        self.noisy = nn.NoisyLayer(emb_size, emb_size)
+        self.v_noisy = nn.NoisyLayer(emb_size, 1)
+        self.a_noisy = nn.NoisyLayer(emb_size, out_size)
+
+    def forward(self, state):
+        comm = self.linear(state)
+        comm = F.relu(self.noisy(comm))
+        v = self.v_noisy(comm)
+        a = self.a_noisy(comm)
+        a_norm = a - a.mean(dim=1, keepdim=True)
+        return v + a
+
+    def set_noise(self):
+        self.noisy.set_noise()
+        self.v_noisy.set_noise()
+        self.a_noisy.set_noise()
+
 class DQN_Agent():
     """
     Agent for DQN
@@ -166,15 +277,6 @@ class DQN_Agent():
     def __init__(self, state_size, act_size, config):
         self.state_size = state_size
         self.act_size = act_size
-
-        self.qnet = QNet(state_size,
-                            act_size).to(config['device'])
-        self.qnet_target = QNet(state_size,
-                                    act_size).to(config['device'])
-
-        self.opt = torch.optim.AdamW(self.qnet.parameters(),
-                                        lr=config['lr'])
-
         self.buff = Buffer(config['buffer_size'])
         self.batch_size = config['batch_size']
         self.t_step = 0
@@ -182,8 +284,16 @@ class DQN_Agent():
         self.learn_step = config['learn_step']
         self.t = config['t']
         self.update_step = config['update_step']
-
         self.device = config['device']
+        self.prepare_net()
+
+    def prepare_net(self):
+        self.qnet = QNet(self.state_size,
+                         self.act_size).to(config['device'])
+        self.qnet_target = QNet(self.state_size,
+                                self.act_size).to(config['device'])
+        self.opt = torch.optim.AdamW(self.qnet.parameters(),
+                                     lr=config['lr'])
 
     def act(self, state, eps=0.):
         """
@@ -282,15 +392,17 @@ class DoubleDQN_Agent(DQN_Agent):
 class DuelingDQN_Agent(DQN_Agent):
     def __init__(self, state_size, act_size, config):
         super().__init__(state_size, act_size, config)
+
+    def prepare_net(self):
         """
         Change network for Dueling DQN
         """
-        self.qnet = DuelingQNet(state_size,
-                                act_size).to(config['device'])
-        self.qnet_target = DuelingQNet(state_size,
-                                        act_size).to(config['device'])
+        self.qnet = DuelingQNet(self.state_size,
+                                self.act_size).to(config['device'])
+        self.qnet_target = DuelingQNet(self.state_size,
+                                       self.act_size).to(config['device'])
         self.opt = torch.optim.AdamW(self.qnet.parameters(),
-                                        lr=config['lr'])
+                                     lr=config['lr'])
 
 class PrioritizeDQN_Agent(DQN_Agent):
     def __init__(self, state_size, act_size, config):
@@ -350,3 +462,63 @@ class PrioritizeDQN_Agent(DQN_Agent):
         loss.backward()
         self.opt.step()
         self.buff.update_loss(idx, (q_exps - q_targets).pow(2).sum(dim=1) / q_exps.size(1))
+
+# TODO: Test NoisyNetAgent
+class NoisyNetAgent(DQN_Agent):
+    def __init__(self, state_size, act_size, config):
+        super().__init__(state_size, act_size, config)
+
+    def prepare_net(self):
+        """
+        change QNet to NouisyNet
+        """
+        self.qnet = NoisyNet(self.state_size,
+                         self.act_size).to(config['device'])
+        self.qnet_target = NoisyNet(self.state_size,
+                                self.act_size).to(config['device'])
+        self.opt = torch.optim.AdamW(self.qnet.parameters(),
+                                     lr=config['lr'])
+
+    def act(self, state, eps=0.):
+        state = torch.from_numpy(state)\
+                    .float()\
+                    .unsqueeze(0)\
+                    .to(self.device)
+        self.qnet.eval()
+        with torch.no_grad():
+            act_vals = self.qnet(state)
+        return np.argmax(act_vals.cpu().data.numpy())
+
+    def step(self, state, nxt_state, reward, done, act):
+        """
+        Update for each step
+        """
+        self.buff.store(state, nxt_state, reward, done, act)
+        self.t_step += 1
+        self.t_step %= self.learn_step * self.update_step
+        if self.t_step % self.learn_step == 0:
+            self.learn()
+        if self.t_step % self.update_step == 0:
+            self.soft_update()
+
+    def learn(self):
+        """
+        Update target Q
+        """
+        states, nxt_states, rewards, dones, acts, idx = \
+                                        self.buff.sample(self.batch_size,
+                                                         self.device)
+        self.qnet_target.set_noise()
+        self.qnet_target.eval()
+        q_nxt_states = self.qnet_target(nxt_states)\
+                                    .detach()\
+                                    .max(1)[0].unsqueeze(1)
+        q_targets = rewards + self.gamma * q_nxt_states * (1 - dones)
+        self.qnet.set_noise()
+        self.qnet.train()
+        acts = acts.long()
+        q_exps = self.qnet(states).gather(1, acts)
+        loss = F.mse_loss(q_exps, q_targets)
+        self.opt.zero_grad()
+        loss.backward()
+        self.opt.step()
