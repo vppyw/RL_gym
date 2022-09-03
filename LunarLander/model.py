@@ -163,7 +163,7 @@ class NoisyLayer(nn.Module):
     """
     Noisy Linear Layer
     """
-    def __init__(self, in_features, out_features, var_init):
+    def __init__(self, in_features, out_features, var_init=0.5):
         super().__init__()
         self.in_features = in_features
         self.out_features = out_features
@@ -208,6 +208,7 @@ class NoisyLayer(nn.Module):
 
     def set_sig(self, sig):
         sig.data.fill_(self.var_init / math.sqrt(self.in_features))
+
     def set_noise(self):
         """
         Setting new noise using factorised Gaussian noise
@@ -215,11 +216,11 @@ class NoisyLayer(nn.Module):
         # Factorised Gaussian noise
         eps_i = self.f(self.in_features)
         eps_j = self.f(self.out_features)
-        self.weights_eps.data.copy_(esp_j.outer(esp_i))
+        self.weights_eps.data.copy_(eps_j.outer(eps_i))
 
-        # Problem: should the noise be the same as esp_j?
-        esp_j = self.f(self.out_features)
-        self.bias_eps.data.copy_(esp_j)
+        # Problem: should the noise be the same as eps_j?
+        eps_j = self.f(self.out_features)
+        self.bias_eps.data.copy_(eps_j)
 
     def f(self, size):
         """
@@ -234,7 +235,7 @@ class NoisyNet(nn.Module):
         super().__init__()
         self.linear = nn.Linear(in_size, emb_size)
         self.noisy0 = NoisyLayer(emb_size, emb_size)
-        self.noisy1 = NoisyLayer(emb_size, emb_size)
+        self.noisy1 = NoisyLayer(emb_size, out_size)
         
     def forward(self, state):
         x = F.relu(self.linear(state))
@@ -250,7 +251,7 @@ class DuelingNoisyNet(nn.Module):
     def __init__(self, in_size, out_size, emb_size=64):
         super().__init__()
         self.linear = nn.Sequential(
-            nn.Linear(in_size, emb_size)
+            nn.Linear(in_size, emb_size),
             nn.ReLU(),
         )
         self.noisy = nn.NoisyLayer(emb_size, emb_size)
@@ -279,6 +280,7 @@ class DQN_Agent():
         self.act_size = act_size
         self.buff = Buffer(config['buffer_size'])
         self.batch_size = config['batch_size']
+        self.lr = config['lr']
         self.t_step = 0
         self.gamma = config['gamma']
         self.learn_step = config['learn_step']
@@ -289,11 +291,11 @@ class DQN_Agent():
 
     def prepare_net(self):
         self.qnet = QNet(self.state_size,
-                         self.act_size).to(config['device'])
+                         self.act_size).to(self.device)
         self.qnet_target = QNet(self.state_size,
-                                self.act_size).to(config['device'])
+                                self.act_size).to(self.device)
         self.opt = torch.optim.AdamW(self.qnet.parameters(),
-                                     lr=config['lr'])
+                                     lr=self.lr)
 
     def act(self, state, eps=0.):
         """
@@ -398,11 +400,11 @@ class DuelingDQN_Agent(DQN_Agent):
         Change network for Dueling DQN
         """
         self.qnet = DuelingQNet(self.state_size,
-                                self.act_size).to(config['device'])
+                                self.act_size).to(self.device)
         self.qnet_target = DuelingQNet(self.state_size,
-                                       self.act_size).to(config['device'])
+                                       self.act_size).to(self.device)
         self.opt = torch.optim.AdamW(self.qnet.parameters(),
-                                     lr=config['lr'])
+                                     lr=self.lr)
 
 class PrioritizeDQN_Agent(DQN_Agent):
     def __init__(self, state_size, act_size, config):
@@ -463,7 +465,6 @@ class PrioritizeDQN_Agent(DQN_Agent):
         self.opt.step()
         self.buff.update_loss(idx, (q_exps - q_targets).pow(2).sum(dim=1) / q_exps.size(1))
 
-# TODO: Test NoisyNetAgent
 class NoisyNetAgent(DQN_Agent):
     def __init__(self, state_size, act_size, config):
         super().__init__(state_size, act_size, config)
@@ -473,18 +474,21 @@ class NoisyNetAgent(DQN_Agent):
         change QNet to NouisyNet
         """
         self.qnet = NoisyNet(self.state_size,
-                         self.act_size).to(config['device'])
+                            self.act_size).to(self.device)
         self.qnet_target = NoisyNet(self.state_size,
-                                self.act_size).to(config['device'])
+                                self.act_size).to(self.device)
         self.opt = torch.optim.AdamW(self.qnet.parameters(),
-                                     lr=config['lr'])
+                                     lr=self.lr)
 
-    def act(self, state, eps=0.):
+    def act(self, state, eps=0., noise=False):
         state = torch.from_numpy(state)\
                     .float()\
                     .unsqueeze(0)\
                     .to(self.device)
-        self.qnet.eval()
+        if noise:
+            self.qnet.train()
+        else:
+            self.qnet.eval()
         with torch.no_grad():
             act_vals = self.qnet(state)
         return np.argmax(act_vals.cpu().data.numpy())
@@ -509,7 +513,7 @@ class NoisyNetAgent(DQN_Agent):
                                         self.buff.sample(self.batch_size,
                                                          self.device)
         self.qnet_target.set_noise()
-        self.qnet_target.eval()
+        self.qnet_target.train()
         q_nxt_states = self.qnet_target(nxt_states)\
                                     .detach()\
                                     .max(1)[0].unsqueeze(1)
@@ -522,3 +526,7 @@ class NoisyNetAgent(DQN_Agent):
         self.opt.zero_grad()
         loss.backward()
         self.opt.step()
+    
+    def set_noise(self):
+        self.qnet.set_noise()
+        self.qnet_target.set_noise()
