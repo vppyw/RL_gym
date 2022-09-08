@@ -294,6 +294,7 @@ class DQN_Agent():
                          self.act_size).to(self.device)
         self.qnet_target = QNet(self.state_size,
                                 self.act_size).to(self.device)
+
         self.opt = torch.optim.AdamW(self.qnet.parameters(),
                                      lr=self.lr)
 
@@ -353,14 +354,17 @@ class DQN_Agent():
                                         self.qnet_target.parameters()):
             param_target.data.copy_(self.t * param.data\
                                     + (1 - self.t) * param_target.data)
+    
+    def hard_update(self):
+        self.qnet_target.load_state_dict(self.qnet.state_dict())
 
     def to(self, device):
         """
         Change device
         """
         self.device = device
-        self.q_net = self.q_net.to(device)
-        self.q_net_target = self.q_net_target.to(device)
+        self.qnet = self.qnet.to(device)
+        self.qnet_target = self.qnet_target.to(device)
 
 class DoubleDQN_Agent(DQN_Agent):
     def __init__(self, state_size, act_size, config):
