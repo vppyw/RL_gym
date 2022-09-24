@@ -40,7 +40,7 @@ def main():
         'log': 'double_dqn_scores.csv',
         'model': 'DoubleDQN_QNet.pt',
     }
-    env = gym.make("LunarLander-v2", new_step_api=True)
+    env = gym.make("LunarLander-v2")
     same_seed(config['seed'], env)
 
     agent = model.DoubleDQN_Agent(env.observation_space.shape[0],
@@ -50,7 +50,7 @@ def main():
     eps = config['eps_max']
     scores = []
     for episode in tqdm(range(config['num_episode']), ncols=50):
-        state = env.reset()
+        state, _ = env.reset()
         score = 0
         for step in range(config['max_step']):
             act = agent.act(state, eps)
@@ -67,7 +67,7 @@ def main():
     agent.qnet.to('cpu')
     torch.save(agent.qnet.state_dict(), config['model'])
     with open(config['log'], 'w') as f:
-        f.write('episodes,score')
+        f.write('episodes,score\n')
         for idx, val in enumerate(scores):
             f.write(f'{idx},{val}\n')
 

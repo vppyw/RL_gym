@@ -50,7 +50,7 @@ def main():
     eps = config['eps_max']
     scores = []
     for episode in tqdm(range(config['num_episode']), ncols=50):
-        state = env.reset()
+        state, _ = env.reset()
         score = 0
         agent.set_noise()
         for step in range(config['max_step']):
@@ -67,7 +67,7 @@ def main():
     agent.qnet.to('cpu')
     torch.save(agent.qnet.state_dict(), config['model'])
     with open(config['log'], 'w') as f:
-        f.write('episodes,score')
+        f.write('episodes,score\n')
         for idx, val in enumerate(scores):
             f.write(f'{idx},{val}\n')
 
